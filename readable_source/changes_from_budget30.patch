@@ -1,0 +1,127 @@
+--- delta30/run_pipeline.py
++++ delta50/run_pipeline.py
+@@ -64,7 +64,7 @@
+     source=stage.resolve()
+     destination=persistent_stage(b)
+     if source==destination.resolve() and destination.exists():return
+-    assert source.is_relative_to(pathlib.Path('/dev/shm/books_delta_budget30_lr1e4_26412_temporary'))
++    assert source.is_relative_to(pathlib.Path('/dev/shm/books_delta_budget50_lr1e4_26412_temporary'))
+     assert (source/'stage_manifest.json').is_file()
+     destination.parent.mkdir(parents=True,exist_ok=True)
+     partial=destination.with_name(destination.name+'_partial_'+stamp())
+@@ -86,7 +86,7 @@
+     assert stage.resolve()==destination.resolve() and '/dev/shm' not in str(stage.resolve())
+     write(ROOT/'audit'/f'persistence_block{b}.json',dict(source=str(source),destination=str(destination),
+           all_files_sha256_equal=True,files=copied,final_checkpoint_uses_regular_persistent_files=True))
+-    assert source.resolve().is_relative_to(pathlib.Path('/dev/shm/books_delta_budget30_lr1e4_26412_temporary'))
++    assert source.resolve().is_relative_to(pathlib.Path('/dev/shm/books_delta_budget50_lr1e4_26412_temporary'))
+     shutil.rmtree(source)
+ 
+ def main():
+@@ -102,7 +102,7 @@
+     assert (ROOT/'audit/asset_compatibility.json').is_file()
+     system_need=512*1024**2
+     data_need=sum(4.25e9 for b in [1,2,3,4] if not (persistent_stage(b)/'stage_manifest.json').exists())+4.5e9
+-    assert shutil.disk_usage(ROOT).free>data_need
++    assert shutil.disk_usage(ROOT).free>data_need+8*1024**3
+     assert shutil.disk_usage(ROOT).free>system_need
+     assert shutil.disk_usage('/dev/shm').free>24*1024**3
+     inventory=subprocess.check_output(['nvidia-smi','--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu','--format=csv,noheader,nounits'],text=True)
+@@ -119,7 +119,7 @@
+                WANDB_MODE='offline',WANDB_DIR=str(ROOT/'wandb'),HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',
+                TOKENIZERS_PARALLELISM='false',PYTHONUNBUFFERED='1',PYTHONHASHSEED='42',OMP_NUM_THREADS='6',
+                TORCH_EXTENSIONS_DIR=str(ROOT/'torch_extensions'))
+-    port=54412
++    port=60412
+     for p in [port,port+1,port+2,port+3,port+4,port+10]:
+         with socket.socket() as s:s.bind(('127.0.0.1',p))
+     versions={n:importlib.metadata.version(n) for n in ['torch','transformers','accelerate','deepspeed','peft','flash-attn','scipy','wandb','numpy','safetensors','datasets','pyarrow','pandas']}
+@@ -136,7 +136,7 @@
+           continual_loss_weight=0,regularization_mode='none',regularization_weight=0,replay_ratio=0,
+           score='sum_i ||((alpha/r) B A) * grad_W_eff loss_i||_1 / (numel(A)+numel(B))',
+           score_product_dtype='FP32',score_sum_dtype='FP64',probe='min(N,max(8,ceil(.1*N))), seed42+block, without replacement',
+-          reselect_optimizer_steps=100,total_LoRA_AB_budget=.3,attention_share=.4,mlp_share=.6,
++          reselect_optimizer_steps=100,total_LoRA_AB_budget=.5,attention_share=.4,mlp_share=.6,
+           generation_mode='beam-search',evaluated_blocks=[1,2,3,4],skipped_blocks=[0],stage_restoration='historical_stage_state',
+           test_batch_size_per_gpu=1,num_beams=10,num_return_sequences=10,max_new_tokens=10,early_stopping=True,do_sample=False,
+           official_commit='edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e',
+@@ -155,7 +155,7 @@
+         '--lora_modules_to_save','embed_tokens,lm_head','--shift_flag','lora_kldiv_latest',
+         '--deepspeed',str(ROOT/'train_code/ds_split_budget.json'),'--per_device_batch_size','8','--gradient_accumulation_steps','2',
+         '--bf16','--optim','adamw_torch','--weight_decay','.01','--lr_scheduler_type','cosine','--warmup_ratio','.01','--save_and_eval_strategy','epoch',
+-        '--probe_batches','8','--probe_batch_size','1','--probe_ratio','.1','--probe_seed','42','--budget_ratio','.3',
++        '--probe_batches','8','--probe_batch_size','1','--probe_ratio','.1','--probe_seed','42','--budget_ratio','.5',
+         '--attention_budget_share','.4','--score_mode','lora_delta_taylor','--selection_score_mode','gradient_per_parameter',
+         '--replay_ratio','0','--history_samples','256','--history_seed','42','--reselect_steps','100',
+         '--regularization_mode','none','--regularization_weight','0']
+@@ -169,7 +169,7 @@
+         if stage.exists():
+             failed=stage.with_name(stage.name+'_failed_'+stamp());stage.rename(failed)
+             print('STAGE_RESTART_FROM_PREVIOUS_VERIFIED_MODEL',b,'preserved',failed,flush=True)
+-        temporary=pathlib.Path('/dev/shm/books_delta_budget30_lr1e4_26412_temporary')/f'block_{b}_{stamp()}'
++        temporary=pathlib.Path('/dev/shm/books_delta_budget50_lr1e4_26412_temporary')/f'block_{b}_{stamp()}'
+         temporary.mkdir(parents=True,exist_ok=False)
+         stage.symlink_to(temporary,target_is_directory=True)
+         stage_args=['--root',str(ROOT),'--source_checkpoint',str(ROOT/'ckpt'/f'block_{b-1}'),'--block_id',str(b)]+common
+@@ -183,9 +183,9 @@
+                 write(ROOT/'audit'/f'initial_selection_block{b}.json',selection)
+         seal_stage(b)
+         persist_stage(b)
+-    write(ROOT/'audit/storage_plan.json',dict(final_system_blocks=[],final_data_blocks=[1,2,3,4],temporary='/dev/shm/books_delta_budget30_lr1e4_26412_temporary',all_final_stages_persistent=True))
++    write(ROOT/'audit/storage_plan.json',dict(final_system_blocks=[],final_data_blocks=[1,2,3,4],temporary='/dev/shm/books_delta_budget50_lr1e4_26412_temporary',all_final_stages_persistent=True))
+     make_eval_layout()
+-    result=ROOT/'Books_delta_budget30_lr1e4_beam_search.json'
++    result=ROOT/'Books_delta_budget50_lr1e4_beam_search.json'
+     if result.exists():result=result.with_name(result.stem+'_'+stamp()+'.json')
+     assert not result.exists()
+     write(ROOT/'audit/evaluation_target.json',dict(result=str(result),generation_mode='beam-search',
+--- delta30/train_entry.py
++++ delta50/train_entry.py
+@@ -11,13 +11,13 @@
+     assert self.cfg.selection_score_mode == 'gradient_per_parameter'
+     assert self.cfg.regularization_mode == 'none' and self.cfg.regularization_weight == 0
+     assert self.cfg.replay_ratio == 0 and self.trainer.continual_loss_weight == 0
+-    assert self.cfg.attention_budget_share == .4 and self.cfg.budget_ratio == .3
++    assert self.cfg.attention_budget_share == .4 and self.cfg.budget_ratio == .5
+     assert args.learning_rate == 1e-4
+     assert args.seed == self.cfg.seed == 42 and self.cfg.probe_seed == 42
+     assert self.cfg.temperature == .8 and self.cfg.only_train_response
+     assert args.num_train_epochs == 4 and args.per_device_train_batch_size == 8
+     assert args.gradient_accumulation_steps == 2 and args.bf16 and not args.fp16
+-    assert self.family_budgets == {'attention':676331,'mlp':1014497}
++    assert self.family_budgets == {'attention':1127219,'mlp':1690829}
+     assert all(self.state_dict()['family_used_P'][k] <= self.family_budgets[k] for k in self.family_budgets)
+     backbone_trainable = [n for n,p in self.model.named_parameters() if '.orig.' in n and p.requires_grad]
+     assert not backbone_trainable, backbone_trainable
+--- delta30/final_verify.py
++++ delta50/final_verify.py
+@@ -19,7 +19,7 @@
+ manifest=read(ROOT/'run_manifest.json')
+ assert manifest['attention_share']==.4 and manifest['mlp_share']==.6
+ assert manifest['reselect_optimizer_steps']==100
+-assert manifest['total_LoRA_AB_budget']==.3 and manifest['actual_initial_learning_rate']==1e-4
++assert manifest['total_LoRA_AB_budget']==.5 and manifest['actual_initial_learning_rate']==1e-4
+ for name,h in manifest['code_sha256'].items():assert digest(ROOT/name)==h,name
+ baseline=ROOT/'official_baseline';code=ROOT/'eval_code'
+ for name in ['collator.py','continual_data_v2.py','continual_lora.py','evaluate.py','prompt.py','utils.py']:
+--- delta30/preflight.py
++++ delta50/preflight.py
+@@ -55,15 +55,15 @@
+     assert len(selected)==2 and all(int(row[3])<=64 and int(row[4])==0 for row in selected)
+     assert not any(row[1].strip() in apps for row in selected)
+     remaining=sum(not (ROOT/'ckpt'/f'block_{b}'/'stage_manifest.json').is_file() for b in range(1,5))
+-    needed=21*1024**3 if remaining else 4*1024**3
++    needed=30*1024**3 if remaining else 4*1024**3
+     assert shutil.disk_usage(ROOT).free>needed, f'Insufficient persistent room: {needed} bytes required'
+ 
+     result=dict(status='passed',dataset='Books_cl_ori',data_path=str((ROOT/'datasets/Books_cl_ori').resolve()),shared_block0=str(b0.resolve()),base_model=str(base),
+         base_block0_model_fields_match=fields,tokenizer_mapping_exact=True,vocabulary_size=len(tok),special_tokens=tok.special_tokens_map,
+         user_counts=counts,files=files,gpu_inventory=inv,gpu_processes=apps,selected_gpus=[2,3],
+         versions={n:importlib.metadata.version(n) for n in ['torch','transformers','peft','accelerate','deepspeed','flash-attn','safetensors','numpy','datasets','pandas','pyarrow']},python=sys.version,
+-        estimated_disk_GiB=dict(additional_persistent_peak_at_recovery=21,temporary_shm_peak=16),CUDA_LAUNCH_BLOCKING=os.environ.get('CUDA_LAUNCH_BLOCKING'))
+-    result.update(seed=42,probe_seed=42,lora_full_parameters=5636096,total_budget=1690828,family_budget={'attention':676331,'mlp':1014497})
++        estimated_disk_GiB=dict(additional_persistent_peak_at_recovery=21,search_additional_reserve=8,temporary_shm_peak=16),CUDA_LAUNCH_BLOCKING=os.environ.get('CUDA_LAUNCH_BLOCKING'))
++    result.update(seed=42,probe_seed=42,lora_full_parameters=5636096,total_budget=2818048,family_budget={'attention':1127219,'mlp':1690829})
+     (ROOT/'audit/preflight.json').write_text(json.dumps(result,indent=2))
+     (ROOT/'audit/asset_compatibility.json').write_text(json.dumps(result,indent=2));print(json.dumps(result,indent=2))
+ if __name__=='__main__':main()

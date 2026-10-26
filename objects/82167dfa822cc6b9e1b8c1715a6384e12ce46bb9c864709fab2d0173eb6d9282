@@ -1,0 +1,47 @@
+{
+  "commit": "edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e",
+  "files": [
+    {
+      "file": "continual_test.py",
+      "url": "https://raw.githubusercontent.com/hsyoo32/peso/edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e/Fine-tuning/continual_test.py",
+      "sha256": "0d2c1896eabcfcf3f3176cadb3780f1401f5292efb586ad9cd5cf0d980721fec",
+      "verified": true
+    },
+    {
+      "file": "continual_data_v2.py",
+      "url": "https://raw.githubusercontent.com/hsyoo32/peso/edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e/Fine-tuning/continual_data_v2.py",
+      "sha256": "a63d3cf574b290dc5a960058cdb106b83f0ba786998f868561a23120c1be5923",
+      "verified": true
+    },
+    {
+      "file": "continual_lora.py",
+      "url": "https://raw.githubusercontent.com/hsyoo32/peso/edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e/Fine-tuning/continual_lora.py",
+      "sha256": "f9e0668a75bd3fc5354957ca14caddd21954d801164e71f7d0b6b2a3dd100ee9",
+      "verified": true
+    },
+    {
+      "file": "collator.py",
+      "url": "https://raw.githubusercontent.com/hsyoo32/peso/edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e/Fine-tuning/collator.py",
+      "sha256": "1ec7e60b8e1ec9f8aa8bbe31933999535fbab23851149afcbdcc7ac3d6640588",
+      "verified": true
+    },
+    {
+      "file": "prompt.py",
+      "url": "https://raw.githubusercontent.com/hsyoo32/peso/edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e/Fine-tuning/prompt.py",
+      "sha256": "bfa3cbbfdb8504b95554f6b75a6244c0d1d93fbf736675a756cc0fbc08ae5410",
+      "verified": true
+    },
+    {
+      "file": "evaluate.py",
+      "url": "https://raw.githubusercontent.com/hsyoo32/peso/edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e/Fine-tuning/evaluate.py",
+      "sha256": "6bcbf22965b59edebe2b37ff57c374cb6d3127d9c6254e0eba2b873459c6b357",
+      "verified": true
+    },
+    {
+      "file": "utils.py",
+      "url": "https://raw.githubusercontent.com/hsyoo32/peso/edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e/Fine-tuning/utils.py",
+      "sha256": "049e3f06bd41d19d43fe7ee3c9e64481bd30243c8c1446c9f64b56ae353f531d",
+      "verified": true
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "dataset": "Books_cl_ori",
+  "seed": 42,
+  "budget_ratio": 0.2,
+  "actual_initial_lr": 0.0001,
+  "attention_share": 0.4,
+  "reselect_steps": 100,
+  "gpus": [
+    0,
+    1
+  ],
+  "port": 53412
+}

@@ -1,0 +1,24 @@
+{
+  "chains": [
+    {
+      "budget_percent": 70,
+      "after": "/opt/idarec/runs/books_delta_taylor_budget10_a40_m60_r100_lr1e4_seed42_20261020_26412",
+      "target": "/opt/idarec/runs/books_delta_taylor_budget70_a40_m60_r100_lr1e4_seed42_20261020_26412",
+      "gpus": [
+        0,
+        1
+      ]
+    },
+    {
+      "budget_percent": 80,
+      "after": "/opt/idarec/runs/books_delta_taylor_budget60_a40_m60_r100_lr1e4_seed42_20261020_26412",
+      "target": "/opt/idarec/runs/books_delta_taylor_budget80_a40_m60_r100_lr1e4_seed42_20261020_26412",
+      "gpus": [
+        2,
+        3
+      ]
+    }
+  ],
+  "cleanup_authorization": null,
+  "poll_seconds": 30
+}

@@ -1,0 +1,81 @@
+import json, os, pathlib, sys
+ROOT = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT/'train_code'))
+import matrix_dynamic50_split as experiment
+from dynamic_matrix_control_split import DynamicController
+original = DynamicController.on_train_begin
+def audited_begin(self, args, state, control, **kwargs):
+    original(self, args, state, control, **kwargs)
+    assert set(self.selected)==set(self.candidates) and len(self.selected)==112
+    assert self.budget==sum(self.costs.values())==5636096
+    assert self.cfg.score_mode == 'lora_delta_taylor'
+    assert self.cfg.reselect_steps == 100
+    assert self.cfg.selection_score_mode == 'gradient_per_parameter'
+    assert self.cfg.regularization_mode == 'none' and self.cfg.regularization_weight == 0
+    assert self.cfg.replay_ratio == 0 and self.trainer.continual_loss_weight == 0
+    assert self.cfg.attention_budget_share == 0.3023255813953488 and self.cfg.budget_ratio == 1.0
+    assert args.learning_rate == 0.0001
+    assert args.seed == self.cfg.seed == 42 and self.cfg.probe_seed == 42
+    assert self.cfg.temperature == .8 and self.cfg.only_train_response
+    assert args.num_train_epochs == 4 and args.per_device_train_batch_size == 8
+    assert args.gradient_accumulation_steps == 2 and args.bf16 and not args.fp16
+    assert self.family_budgets == {'attention':1703936,'mlp':3932160}
+    assert all(self.state_dict()['family_used_P'][k] <= self.family_budgets[k] for k in self.family_budgets)
+    backbone_trainable = [n for n,p in self.model.named_parameters() if '.orig.' in n and p.requires_grad]
+    assert not backbone_trainable, backbone_trainable
+    trainable_names=[n for n,p in self.model.named_parameters() if p.requires_grad]
+    assert all(n.endswith('.A') or n.endswith('.B') or '.modules_to_save.default.' in n for n in trainable_names)
+    zero = self.trainer.model_wrapped.optimizer
+    groups = [{k:g.get(k) for k in ['lr','initial_lr','weight_decay','betas','eps']} for g in zero.optimizer.param_groups]
+    assert all(g['initial_lr'] == 0.0001 for g in groups), groups
+    assert all(g['weight_decay'] in [0,.01] for g in groups), groups
+    report = dict(rank=int(os.environ.get('RANK','0')), block=self.cfg.block_id,
+                  actual_optimizer='torch.optim.AdamW',zero_stage=2,reselect_optimizer_steps=100,parameter_groups=groups,
+                  backbone_trainable=backbone_trainable,continual_loss_weight=0,
+                  trainable_names=trainable_names,
+                  regularization_mode='none',regularization_weight=0,replay_ratio=0,
+                  total_lora_AB=sum(self.costs.values()),budget=self.budget,
+                  family_budget=self.family_budgets,family_used=self.state_dict()['family_used_P'],
+                  update_protection='original masked gradients plus preserved FP32 masters and Adam moments',
+                  resume_semantics='stage restart from previous verified best; model-only checkpoints')
+    (ROOT/'audit').mkdir(exist_ok=True)
+    (ROOT/'audit'/f'optimizer_block{self.cfg.block_id}_rank{report["rank"]}.json').write_text(json.dumps(report,indent=2))
+DynamicController.on_train_begin = audited_begin
+original_rescore = DynamicController.rescore
+def audited_rescore(self, step):
+    original_rescore(self,step)
+    assert set(self.selected)==set(self.candidates) and len(self.selected)==112
+    assert self.state_dict()['family_used_P']==self.family_budgets
+    if experiment.rank0():
+        state=self.state_dict()
+        state['family_unused_P']={k:state['family_budget_P'][k]-state['family_used_P'][k] for k in state['family_budget_P']}
+        (ROOT/'audit'/f'reselection_block{self.cfg.block_id}_step{step}.json').write_text(json.dumps(state,indent=2))
+DynamicController.rescore = audited_rescore
+
+# Synchronize the validation-selected path after rank 0 finishes serialization
+# and checkpoint rotation. Trainer 4.52.4 checks path existence on each rank
+# while only rank 0 creates it, so unsynchronized ranks can retain stale paths.
+import torch.distributed as dist
+from dynamic_matrix_control_split import DynamicTrainer
+original_save_checkpoint = DynamicTrainer._save_checkpoint
+def synchronized_save_checkpoint(self, *args, **kwargs):
+    result = original_save_checkpoint(self, *args, **kwargs)
+    if dist.is_initialized():
+        dist.barrier()
+        payload = [dict(best_model_checkpoint=self.state.best_model_checkpoint,
+                        best_metric=self.state.best_metric,
+                        best_global_step=self.state.best_global_step) if dist.get_rank()==0 else None]
+        dist.broadcast_object_list(payload,src=0)
+        for key,value in payload[0].items():setattr(self.state,key,value)
+        path=pathlib.Path(self.state.best_model_checkpoint)
+        assert (path/'model.safetensors').is_file(),str(path)
+        loss_values=[x['eval_loss'] for x in self.state.log_history if 'eval_loss' in x]
+        assert self.state.best_metric==min(loss_values)
+        receipt=dict(rank=dist.get_rank(),global_step=self.state.global_step,**payload[0],
+                     selected_file_exists=True,minimum_validation_loss=min(loss_values))
+        (ROOT/'audit'/f'checkpoint_sync_block{self.dynamic_controller.cfg.block_id}_step{self.state.global_step}_rank{dist.get_rank()}.json').write_text(json.dumps(receipt,indent=2))
+        print('VALIDATION_BEST_CHECKPOINT_SYNCHRONIZED',json.dumps(receipt),flush=True)
+    return result
+DynamicTrainer._save_checkpoint=synchronized_save_checkpoint
+
+experiment.main()

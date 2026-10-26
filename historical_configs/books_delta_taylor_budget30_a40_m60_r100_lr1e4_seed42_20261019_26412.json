@@ -1,0 +1,9 @@
+{
+  "name": "books_delta_taylor_budget30_a40_m60_r100_lr1e4_seed42_20261019_26412",
+  "path": "/opt/idarec/runs/books_delta_taylor_budget30_a40_m60_r100_lr1e4_seed42_20261019_26412",
+  "status": "completed",
+  "budget_ratio": 0.3,
+  "actual_initial_lr": 0.0001,
+  "historical_snapshot_preserved": true,
+  "result": "/opt/idarec/runs/books_delta_taylor_budget30_a40_m60_r100_lr1e4_seed42_20261019_26412/Books_delta_budget30_lr1e4_beam_search.json"
+}

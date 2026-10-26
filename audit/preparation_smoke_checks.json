@@ -1,0 +1,60 @@
+{
+  "passed": true,
+  "cases": [
+    {
+      "budget": 0.2,
+      "lr": 0.0001,
+      "share": 0.4,
+      "gpus": [
+        2,
+        3
+      ],
+      "reselect_steps": 100,
+      "files_hardlinked_and_hashed": true,
+      "core_unchanged": true,
+      "prepared_only": true
+    },
+    {
+      "budget": 0.4,
+      "lr": 2e-05,
+      "share": 0.4,
+      "gpus": [
+        0,
+        1
+      ],
+      "reselect_steps": 50,
+      "files_hardlinked_and_hashed": true,
+      "core_unchanged": true,
+      "prepared_only": true
+    },
+    {
+      "budget": 0.3,
+      "lr": 0.0001,
+      "share": 0.6,
+      "gpus": [
+        2,
+        3
+      ],
+      "reselect_steps": 100,
+      "files_hardlinked_and_hashed": true,
+      "core_unchanged": true,
+      "prepared_only": true
+    },
+    {
+      "budget": 1.0,
+      "lr": 0.0001,
+      "share": 0.4,
+      "gpus": [
+        0,
+        1
+      ],
+      "reselect_steps": 100,
+      "files_hardlinked_and_hashed": true,
+      "core_unchanged": true,
+      "prepared_only": true
+    }
+  ],
+  "no_gpu_experiment_started": true,
+  "historical_runs_untouched": true,
+  "other_methods_untouched": true
+}
