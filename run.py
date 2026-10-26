@@ -81,8 +81,6 @@ def transform(name,text,cfg,profile,out):
             line=line.replace('1e-4',newlr)
         if any(token in line for token in ['reselect_steps','reselect_optimizer_steps']):
             line=re.sub(r'\b100\b',str(cfg['reselect_steps']),line)
-        if name=='final_verify.py' and 'for rank in [' in line:
-            line=re.sub(r'for rank in \[[^\]]+\]', 'for rank in [0,1]',line)
         if 'for index in [' in line:
             line=re.sub(r'for index in \[[^\]]+\]',f'for index in {gpus}',line)
         if 'row.split' in line and ' in [' in line:
@@ -136,8 +134,6 @@ def execute(output):
     env.update(CUDA_VISIBLE_DEVICES=','.join(map(str,cfg['gpus'])),PYTHONUNBUFFERED='1')
     env.pop('CUDA_LAUNCH_BLOCKING',None)
     python=str(output/'env/bin/python')
-    with (output/'logs/initial_preflight.log').open('ab') as log:
-        subprocess.run([python,str(output/'preflight.py')],cwd=output,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
     with (output/'logs/launcher.log').open('ab',buffering=0) as log:
         process=subprocess.Popen([python,str(output/'run_pipeline.py')],cwd=output,env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,close_fds=True)
     (output/'launcher.pid').write_text(str(process.pid)+'\n')

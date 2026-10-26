@@ -1,0 +1,185 @@
+import datetime,fcntl,hashlib,importlib.metadata,json,os,pathlib,shlex,shutil,socket,subprocess,sys,traceback
+ROOT=pathlib.Path(__file__).resolve().parent
+PYTHON=sys.executable
+SELECTED_UUIDS=set()
+def stamp():return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y%m%d_%H%M%S')
+def read(p):return json.loads(pathlib.Path(p).read_text())
+def write(p,v):
+    p=pathlib.Path(p);p.parent.mkdir(parents=True,exist_ok=True)
+    tmp=p.with_name(p.name+'.tmp');tmp.write_text(json.dumps(v,indent=2,ensure_ascii=False));tmp.replace(p)
+def digest(p):
+    h=hashlib.sha256()
+    with p.open('rb') as f:
+        for x in iter(lambda:f.read(8*1024*1024),b''):h.update(x)
+    return h.hexdigest()
+def phase(name,cmd,cwd,env):
+    if name!='environment' and name!='gradient_identity':
+        active=subprocess.check_output(['nvidia-smi','--query-compute-apps=gpu_uuid,pid,process_name,used_memory','--format=csv,noheader,nounits'],text=True)
+        assert not any(line.split(',')[0].strip() in SELECTED_UUIDS for line in active.splitlines()),f'Selected GPU occupied before {name}: {active}'
+    log=ROOT/'logs'/f'{name}_{stamp()}.log'
+    write(ROOT/'status.json',dict(phase=name,status='running',log=str(log),pid=os.getpid(),updated=stamp()))
+    record=dict(phase=name,argv=cmd,shell=shlex.join(cmd),cwd=str(cwd),log=str(log),start=stamp(),
+                environment={k:env.get(k) for k in ['CUDA_VISIBLE_DEVICES','CUDA_LAUNCH_BLOCKING','NCCL_P2P_DISABLE','NCCL_IB_DISABLE','PYTHONHASHSEED']})
+    print('PHASE',name,log,flush=True)
+    with log.open('ab',buffering=0) as out:
+        process=subprocess.run(cmd,cwd=cwd,env=env,stdout=out,stderr=subprocess.STDOUT)
+    record.update(exit=process.returncode,end=stamp())
+    with (ROOT/'commands.jsonl').open('a') as f:f.write(json.dumps(record)+'\n')
+    if process.returncode:raise RuntimeError(f'{name} failed with exit {process.returncode}; log={log}')
+def seal_stage(b):
+    stage=ROOT/'ckpt'/f'block_{b}'
+    check=read(stage/'checkpoint_reload_validation.json')
+    assert check['saved_tensors_reload_exactly'] and check['two_independent_reloads_logits_exactly_equal']
+    config=read(stage/'launch_config.json');a=config['experiment_args']
+    assert a['attention_budget_share']==0.3023255813953488 and a['score_mode']=='lora_delta_taylor'
+    assert config['training_arguments']['learning_rate']==1e-4
+    assert config['original_train_length']==config['actual_train_length']
+    hashes={p.name:digest(p) for p in stage.iterdir() if p.is_file() and p.name!='stage_manifest.json'}
+    write(stage/'stage_manifest.json',dict(block=b,files=hashes,complete=True,
+          checkpoint_selection='minimum validation response CE',resume_semantics='model-only stage restart'))
+def make_eval_layout():
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    layout=ROOT/'evaluation_checkpoints';layout.mkdir(exist_ok=True)
+    for name in ['config.json','generation_config.json','special_tokens_map.json','tokenizer.json','tokenizer_config.json']:
+        shutil.copy2(ROOT/'ckpt/block_4'/name,layout/name)
+    final=layout/'block_4'
+    if not final.exists():final.symlink_to(ROOT/'ckpt/block_4',target_is_directory=True)
+    for b in range(1,4):
+        dest=layout/f'block_{b}';dest.mkdir(exist_ok=True)
+        with safe_open(str(ROOT/'ckpt'/f'block_{b}'/'model.safetensors'),framework='pt',device='cpu') as f:
+            values={k:f.get_tensor(k) for k in f.keys() if '.modules_to_save.default.' in k}
+            assert len(values)==2
+            save_file(values,str(dest/'modules_to_save.safetensors'))
+        write(dest/'subset_manifest.json',dict(source=str(ROOT/'ckpt'/f'block_{b}'/'model.safetensors'),
+              source_sha256=read(ROOT/'ckpt'/f'block_{b}'/'stage_manifest.json')['files']['model.safetensors'],
+              subset_sha256=digest(dest/'modules_to_save.safetensors')))
+
+def persistent_stage(b):
+    parent=ROOT/'persistent_stages'
+    return parent/f'block_{b}'
+
+def persist_stage(b):
+    stage=ROOT/'ckpt'/f'block_{b}'
+    source=stage.resolve()
+    destination=persistent_stage(b)
+    if source==destination.resolve() and destination.exists():return
+    assert source.is_relative_to(pathlib.Path('/dev/shm/books_delta_budget100_lr1e4_26412_temporary'))
+    assert (source/'stage_manifest.json').is_file()
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    partial=destination.with_name(destination.name+'_partial_'+stamp())
+    assert not destination.exists() and not partial.exists()
+    shutil.copytree(source,partial,symlinks=False)
+    copied=[]
+    for original in source.rglob('*'):
+        if original.is_file():
+            relative=original.relative_to(source)
+            saved=partial/relative
+            assert saved.is_file() and not saved.is_symlink()
+            h=digest(original);assert digest(saved)==h,str(relative)
+            copied.append(dict(file=str(relative),sha256=h,bytes=saved.stat().st_size))
+    partial.rename(destination)
+    temporary_link=stage.with_name(stage.name+'_persistent_link')
+    assert stage.is_symlink() and not temporary_link.exists()
+    temporary_link.symlink_to(destination,target_is_directory=True)
+    os.replace(temporary_link,stage)
+    assert stage.resolve()==destination.resolve() and '/dev/shm' not in str(stage.resolve())
+    assert source.resolve().is_relative_to(pathlib.Path('/dev/shm/books_delta_budget100_lr1e4_26412_temporary'))
+    shutil.rmtree(source)
+
+def main():
+    global SELECTED_UUIDS
+    (ROOT/'logs').mkdir(exist_ok=True);(ROOT/'audit').mkdir(exist_ok=True)
+    lock=(ROOT/'pipeline.lock').open('w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    gpu_locks=[]
+    for index in [2,3]:
+        handle=pathlib.Path(f'/tmp/idarec_gpu_{index}.lock').open('a')
+        fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB);gpu_locks.append(handle)
+    (ROOT/'pipeline.pid').write_text(str(os.getpid()))
+    if (ROOT/'completed').exists():return
+    system_need=512*1024**2
+    data_need=sum(4.25e9 for b in [1,2,3,4] if not (persistent_stage(b)/'stage_manifest.json').exists())+4.5e9
+    assert shutil.disk_usage(ROOT).free>data_need+12*1024**3
+    assert shutil.disk_usage(ROOT).free>system_need
+    assert shutil.disk_usage('/dev/shm').free>24*1024**3
+    inventory=subprocess.check_output(['nvidia-smi','--query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu','--format=csv,noheader,nounits'],text=True)
+    applications=subprocess.check_output(['nvidia-smi','--query-compute-apps=gpu_uuid,pid,process_name,used_memory','--format=csv,noheader,nounits'],text=True)
+    selected_uuids={row.split(',')[1].strip() for row in inventory.splitlines() if int(row.split(',')[0]) in [2,3]}
+    assert not any(line.split(',')[0].strip() in selected_uuids for line in applications.splitlines()),applications
+    selected_rows=[row.split(',') for row in inventory.splitlines() if int(row.split(',')[0]) in [2,3]]
+    assert len(selected_rows)==2 and all(int(row[4])<=64 and int(row[5])==0 for row in selected_rows)
+    SELECTED_UUIDS=selected_uuids
+    env=dict(os.environ);cleared=env.pop('CUDA_LAUNCH_BLOCKING',None)
+    env.update(CUDA_VISIBLE_DEVICES='2,3',CUDA_DEVICE_ORDER='PCI_BUS_ID',NCCL_P2P_DISABLE='1',NCCL_IB_DISABLE='1',
+               CUDA_HOME='/usr/local/cuda',PATH='/usr/local/cuda/bin:'+env.get('PATH',''),
+               LD_LIBRARY_PATH='/usr/local/cuda/lib64:'+env.get('LD_LIBRARY_PATH',''),
+               WANDB_MODE='offline',WANDB_DIR=str(ROOT/'wandb'),HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',
+               TOKENIZERS_PARALLELISM='false',PYTHONUNBUFFERED='1',PYTHONHASHSEED='42',OMP_NUM_THREADS='6',
+               TORCH_EXTENSIONS_DIR=str(ROOT/'torch_extensions'))
+    port=58412
+    for p in [port,port+1,port+2,port+3,port+4,port+10]:
+        with socket.socket() as s:s.bind(('127.0.0.1',p))
+    common=['--base_model',str(ROOT/'inputs/base_model'),'--seed','42','--dataset','Books_cl_ori',
+        '--data_path',str(ROOT/'datasets'),'--learning_rate','1e-3','--epochs','4','--tasks','seqrec',
+        '--train_prompt_sample_num','1','--train_data_sample_num','0','--index_file','.index.epoch20000_edim32_beta0.0.json',
+        '--temperature','.8','--max_seq_len','-1','--max_his_len','20','--only_train_response','--num_blocks','5',
+        '--lora_r','8','--lora_alpha','16','--lora_dropout','.05','--lora_target_modules','q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj',
+        '--lora_modules_to_save','embed_tokens,lm_head','--shift_flag','lora_kldiv_latest',
+        '--deepspeed',str(ROOT/'train_code/ds_split_budget.json'),'--per_device_batch_size','8','--gradient_accumulation_steps','2',
+        '--bf16','--optim','adamw_torch','--weight_decay','.01','--lr_scheduler_type','cosine','--warmup_ratio','.01','--save_and_eval_strategy','epoch',
+        '--probe_batches','8','--probe_batch_size','1','--probe_ratio','.1','--probe_seed','42','--budget_ratio','1.0',
+        '--attention_budget_share','0.3023255813953488','--score_mode','lora_delta_taylor','--selection_score_mode','gradient_per_parameter',
+        '--replay_ratio','0','--history_samples','256','--history_seed','42','--reselect_steps','100',
+        '--regularization_mode','none','--regularization_weight','0']
+    for b in range(1,5):
+        stage=ROOT/'ckpt'/f'block_{b}'
+        if (stage/'stage_manifest.json').is_file():
+            for name,h in read(stage/'stage_manifest.json')['files'].items():assert digest(stage/name)==h
+            persist_stage(b)
+            print('REUSE_VERIFIED_STAGE',b,flush=True);continue
+        if (stage/'checkpoint_reload_validation.json').is_file():seal_stage(b);persist_stage(b);continue
+        if stage.exists():
+            failed=stage.with_name(stage.name+'_failed_'+stamp());stage.rename(failed)
+            print('STAGE_RESTART_FROM_PREVIOUS_VERIFIED_MODEL',b,'preserved',failed,flush=True)
+        temporary=pathlib.Path('/dev/shm/books_delta_budget100_lr1e4_26412_temporary')/f'block_{b}_{stamp()}'
+        temporary.mkdir(parents=True,exist_ok=False)
+        stage.symlink_to(temporary,target_is_directory=True)
+        stage_args=['--root',str(ROOT),'--source_checkpoint',str(ROOT/'ckpt'/f'block_{b-1}'),'--block_id',str(b)]+common
+        for task in ['score','prepare','train']:
+            cmd=[PYTHON,str(ROOT/'train_entry.py'),task]+stage_args
+            if task=='train':cmd=[PYTHON,'-m','torch.distributed.run','--nproc_per_node=2',f'--master_port={port+b}']+cmd[1:]
+            phase(f'block{b}_{task}',cmd,ROOT/'train_code',env)
+            if task=='prepare':
+                selection=read(stage/'selected_layers.json')
+                selection['family_unused_P']={k:selection['family_budget_P'][k]-selection['family_used_P'][k] for k in selection['family_budget_P']}
+        seal_stage(b)
+        persist_stage(b)
+    write(ROOT/'audit/storage_plan.json',dict(final_system_blocks=[],final_data_blocks=[1,2,3,4],temporary='/dev/shm/books_delta_budget100_lr1e4_26412_temporary',all_final_stages_persistent=True))
+    make_eval_layout()
+    result=ROOT/'Books_delta_budget100_lr1e4_beam_search.json'
+    if result.exists():result=result.with_name(result.stem+'_'+stamp()+'.json')
+    assert not result.exists()
+    write(ROOT/'audit/evaluation_target.json',dict(result=str(result),generation_mode='beam-search',
+          evaluated_blocks=[1,2,3,4],skipped_blocks=[0],stage_restoration='historical_stage_state'))
+    cmd=[PYTHON,'-m','torch.distributed.run','--nproc_per_node=2',f'--master_port={port+10}',str(ROOT/'eval_code/continual_test.py'),
+         '--ckpt_path',str(ROOT/'evaluation_checkpoints'),'--base_model',str(ROOT/'inputs/base_model'),
+         '--seed','42','--dataset','Books_cl_ori','--data_path',str(ROOT/'datasets'),'--results_file',str(result),
+         '--test_batch_size','1','--num_beams','10','--index_file','.index.epoch20000_edim32_beta0.0.json',
+         '--shift_flag','lora_kldiv_latest','--num_blocks','5','--test_all_blocks','--use_final_model','--skip_block0',
+         '--lora_r','8','--lora_alpha','16','--lora_dropout','.05','--lora_target_modules','q_proj,v_proj,k_proj,o_proj,gate_proj,down_proj,up_proj',
+         '--lora_modules_to_save','embed_tokens,lm_head']
+    phase('evaluation_beam_search',cmd,ROOT/'eval_code',env)
+    data=read(result)
+    assert data['completed_blocks']==[1,2,3,4] and data['stage_restoration']=='historical_stage_state'
+    removed=[]
+    for b in range(1,4):
+        path=ROOT/'evaluation_checkpoints'/f'block_{b}'/'modules_to_save.safetensors'
+        removed.append(dict(path=str(path),sha256=digest(path),bytes=path.stat().st_size,full_stage_weights_preserved=True))
+        path.unlink()
+    write(ROOT/'audit/duplicate_eval_subsets_removed.json',dict(removed=removed,regenerate='run_pipeline.make_eval_layout(); full stage checkpoints retained'))
+    (ROOT/'completed').write_text(stamp())
+    write(ROOT/'status.json',dict(status='completed',result=str(result),updated=stamp()))
+if __name__=='__main__':
+    try:main()
+    except Exception as e:
+        traceback.print_exc();write(ROOT/'status.json',dict(status='failed',error=str(e),updated=stamp()));sys.exit(1)

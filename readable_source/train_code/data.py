@@ -16,6 +16,27 @@ from prompt import sft_prompt, all_prompt
 import numpy as np
 
 
+
+def load_item_features(data_path, dataset):
+    """Read item metadata from one JSON file or the distributed JSON shards."""
+    from glob import glob
+    path = os.path.join(data_path, dataset + '.item.json')
+    if os.path.isfile(path):
+        with open(path, encoding='utf-8') as stream:
+            return json.load(stream)
+    shards = sorted(glob(os.path.join(data_path, dataset + '.item.part*.json')))
+    if not shards:
+        raise FileNotFoundError(path)
+    result = {}
+    for shard in shards:
+        with open(shard, encoding='utf-8') as stream:
+            rows = json.load(stream)
+        if result.keys() & rows.keys():
+            raise ValueError('Duplicate item IDs in metadata shards: ' + shard)
+        result.update(rows)
+    return result
+
+
 class BaseDataset(Dataset):
 
     def __init__(self, args):
@@ -309,8 +330,7 @@ class FusionSeqRecDataset(BaseDataset):
             self.inters = json.load(f)
         with open(os.path.join(self.data_path, self.dataset + self.index_file), 'r') as f:
             self.indices = json.load(f)
-        with open(os.path.join(self.data_path, self.dataset + ".item.json"), 'r') as f:
-            self.item_feat = json.load(f)
+        self.item_feat = load_item_features(self.data_path, self.dataset)
 
     def _process_train_data(self):
 
@@ -496,8 +516,7 @@ class ItemFeatDataset(BaseDataset):
 
         with open(os.path.join(self.data_path, self.dataset + self.index_file), 'r') as f:
             self.indices = json.load(f)
-        with open(os.path.join(self.data_path, self.dataset + ".item.json"), 'r') as f:
-            self.item_feat = json.load(f)
+        self.item_feat = load_item_features(self.data_path, self.dataset)
 
 
     def _process_data(self):

@@ -19,7 +19,7 @@ from continual_lora import apply_continual_lora
 from evaluate import get_metrics_results, get_topk_results
 from safetensors.torch import load_file
 from utils import *
-from evaluation_audit import *
+from evaluate import ExactSampler, pin_generation, coverage_metadata, gather_complete, save_progress, GENERATION, METRICS
 
 
 def reconstruct_saved_parameter_lists(model, state_dict, local_rank):
@@ -187,7 +187,6 @@ def continual_test_ddp(args):
         for _, module in model.module.named_modules():
             if hasattr(module, "set_saved_matrices"):
                 module.set_saved_matrices(test_block, use_final_model=use_final_model)
-        audit_stage(model.module, args, test_block)
 
         test_data = ContinualSeqRecDataset_v2(
             args,

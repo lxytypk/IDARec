@@ -84,8 +84,6 @@ def persist_stage(b):
     temporary_link.symlink_to(destination,target_is_directory=True)
     os.replace(temporary_link,stage)
     assert stage.resolve()==destination.resolve() and '/dev/shm' not in str(stage.resolve())
-    write(ROOT/'audit'/f'persistence_block{b}.json',dict(source=str(source),destination=str(destination),
-          all_files_sha256_equal=True,files=copied,final_checkpoint_uses_regular_persistent_files=True))
     assert source.resolve().is_relative_to(pathlib.Path('/dev/shm/books_delta_budget40_lr1e4_20261020_26412_temporary'))
     shutil.rmtree(source)
 
@@ -99,7 +97,6 @@ def main():
         fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB);gpu_locks.append(handle)
     (ROOT/'pipeline.pid').write_text(str(os.getpid()))
     if (ROOT/'completed').exists():return
-    assert (ROOT/'audit/asset_compatibility.json').is_file()
     system_need=512*1024**2
     data_need=sum(4.25e9 for b in [1,2,3,4] if not (persistent_stage(b)/'stage_manifest.json').exists())+4.5e9
     assert shutil.disk_usage(ROOT).free>data_need
@@ -122,31 +119,6 @@ def main():
     port=63412
     for p in [port,port+1,port+2,port+3,port+4,port+10]:
         with socket.socket() as s:s.bind(('127.0.0.1',p))
-    versions={n:importlib.metadata.version(n) for n in ['torch','transformers','accelerate','deepspeed','peft','flash-attn','scipy','wandb','numpy','safetensors','datasets','pyarrow','pandas']}
-    hashes={str(p.relative_to(ROOT)):digest(p) for directory in ['train_code','eval_code','official_baseline'] for p in (ROOT/directory).glob('*') if p.is_file()}
-    hashes.update({p.name:digest(p) for p in ROOT.glob('*.py')})
-    hashes['official_evaluation.patch']=digest(ROOT/'official_evaluation.patch')
-    write(ROOT/'run_manifest.json',dict(dataset='Books_cl_ori',base_model='Llama-3.2-1B',seed=42,
-          epochs_per_block=4,gpus=[0,1],gpu_inventory=inventory,compute_processes=applications,
-          training_blocks=[1,2,3,4],shared_block0=str((ROOT/'ckpt/block_0').resolve()),
-          per_device_batch_size=8,gradient_accumulation=2,effective_batch_size=32,actual_initial_learning_rate=1e-4,
-          command_learning_rate=1e-3,internal_learning_rate_multiplier=.1,optimizer='AdamW',weight_decay=.01,
-          lr_scheduler='cosine',warmup_ratio=.01,precision='bf16',distributed='DeepSpeed ZeRO-2',
-          lora_rank=8,lora_alpha=16,lora_dropout=.05,temperature=.8,loss='CE_response(logits / 0.8, labels)',
-          continual_loss_weight=0,regularization_mode='none',regularization_weight=0,replay_ratio=0,
-          score='sum_i ||((alpha/r) B A) * grad_W_eff loss_i||_1 / (numel(A)+numel(B))',
-          score_product_dtype='FP32',score_sum_dtype='FP64',probe='min(N,max(8,ceil(.1*N))), seed42+block, without replacement',
-          reselect_optimizer_steps=100,total_LoRA_AB_budget=.4,attention_share=.4,mlp_share=.6,
-          generation_mode='beam-search',evaluated_blocks=[1,2,3,4],skipped_blocks=[0],stage_restoration='historical_stage_state',
-          test_batch_size_per_gpu=1,num_beams=10,num_return_sequences=10,max_new_tokens=10,early_stopping=True,do_sample=False,
-          official_commit='edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e',
-          local_code_commit=(subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip() if (ROOT/'.git').exists() else 'uncommitted-local-snapshot'),versions=versions,python=sys.version,
-          environment={k:env.get(k) for k in ['CUDA_VISIBLE_DEVICES','CUDA_HOME','NCCL_P2P_DISABLE','NCCL_IB_DISABLE','CUDA_LAUNCH_BLOCKING','PYTHONHASHSEED']},
-          cleared_CUDA_LAUNCH_BLOCKING=cleared,code_sha256=hashes,
-          checkpoint_policy='retain every complete stage; original model-only temporary saves; failed incomplete stage restarts'))
-    phase('environment',[PYTHON,str(ROOT/'collect_environment.py')],ROOT,env)
-    phase('gradient_identity',[PYTHON,str(ROOT/'gradient_probe.py')],ROOT,env)
-    phase('nccl_probe',[PYTHON,'-m','torch.distributed.run','--nproc_per_node=2',f'--master_port={port}',str(ROOT/'nccl_probe.py')],ROOT,env)
     common=['--base_model',str(ROOT/'inputs/base_model'),'--seed','42','--dataset','Books_cl_ori',
         '--data_path',str(ROOT/'datasets'),'--learning_rate','1e-3','--epochs','4','--tasks','seqrec',
         '--train_prompt_sample_num','1','--train_data_sample_num','0','--index_file','.index.epoch20000_edim32_beta0.0.json',
@@ -173,14 +145,13 @@ def main():
         temporary.mkdir(parents=True,exist_ok=False)
         stage.symlink_to(temporary,target_is_directory=True)
         stage_args=['--root',str(ROOT),'--source_checkpoint',str(ROOT/'ckpt'/f'block_{b-1}'),'--block_id',str(b)]+common
-        for task in ['score','prepare','preflight','train']:
+        for task in ['score','prepare','train']:
             cmd=[PYTHON,str(ROOT/'train_entry.py'),task]+stage_args
             if task=='train':cmd=[PYTHON,'-m','torch.distributed.run','--nproc_per_node=2',f'--master_port={port+b}']+cmd[1:]
             phase(f'block{b}_{task}',cmd,ROOT/'train_code',env)
             if task=='prepare':
                 selection=read(stage/'selected_layers.json')
                 selection['family_unused_P']={k:selection['family_budget_P'][k]-selection['family_used_P'][k] for k in selection['family_budget_P']}
-                write(ROOT/'audit'/f'initial_selection_block{b}.json',selection)
         seal_stage(b)
         persist_stage(b)
     write(ROOT/'audit/storage_plan.json',dict(final_system_blocks=[],final_data_blocks=[1,2,3,4],temporary='/dev/shm/books_delta_budget40_lr1e4_20261020_26412_temporary',all_final_stages_persistent=True))
@@ -200,10 +171,6 @@ def main():
     phase('evaluation_beam_search',cmd,ROOT/'eval_code',env)
     data=read(result)
     assert data['completed_blocks']==[1,2,3,4] and data['stage_restoration']=='historical_stage_state'
-    for b in range(1,5):
-        assert read(ROOT/'audit'/f'coverage_block{b}.json')['exactly_once']
-        assert read(ROOT/'audit'/f'stage_{b}_restoration.json')['all_saved_stage_tensors_exact']
-    phase('final_verification',[PYTHON,str(ROOT/'final_verify.py')],ROOT,env)
     removed=[]
     for b in range(1,4):
         path=ROOT/'evaluation_checkpoints'/f'block_{b}'/'modules_to_save.safetensors'

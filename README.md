@@ -1,97 +1,78 @@
 # IDARec
 
 IDARec implements budget-constrained dynamic LoRA adaptation for continual
-recommendation. This repository packages the supplied Books / Llama-3.2-1B
-experiment snapshot, including training, evaluation, and budget configurations.
-The internal scoring identifier remains `lora_delta_taylor` for compatibility.
+recommendation. It uses per-example Delta-W Taylor importance to select LoRA
+matrices under attention/MLP parameter budgets. Selection is refreshed every
+100 optimizer steps; inactive matrices and their optimizer state are protected.
+The internal score-mode identifier is `lora_delta_taylor`.
 
-## Method and included configurations
+## Code
 
-The backend accumulates per-example first-order Taylor importance of the LoRA
-weight update, normalized by adapter parameter cost. It reselects trainable
-adapter matrices every 100 optimizer steps under attention/MLP budgets, and
-protects inactive matrices and their optimizer state. Budget 100% uses the
-separate all-A/B profile.
+`readable_source/train_code/` contains training and selection code;
+`readable_source/eval_code/` contains recommendation evaluation with historical
+stage restoration. `run.py` prepares experiments from immutable backend files
+in `objects/` and the mappings in `profiles/`. The readable source mirrors the
+grouped backend. Editing only the readable copy does not change launched runs.
 
-The supplied configurations cover 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, and
-100% LoRA A/B parameter budgets. They use seed 42, an actual initial learning
-rate of 1e-4, and two GPUs. For partial budgets the attention/MLP split is
-40%/60%. The launcher preserves the original internal learning-rate multiplier.
+`configs/` includes 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, and 100% LoRA A/B
+budget configurations, seed 42, an actual initial learning rate of 1e-4, and two
+GPUs. Partial budgets use a 40%/60% attention/MLP split. The 100% profile updates
+all A/B matrices. The shared launcher is configured for Books/Llama-3.2-1B.
 
-## Layout
+## Data
 
-| Path | Purpose |
-| --- | --- |
-| `run.py` | Prepare an isolated experiment; optionally launch training and evaluation |
-| `readable_source/train_code/` | Readable training and importance-scoring code |
-| `readable_source/eval_code/` | Evaluation with historical stage restoration |
-| `readable_source/official_baseline/` | Upstream evaluation reference and provenance |
-| `objects/` | Immutable SHA-256-addressed backend files used by the launcher |
-| `profiles/` | Backend file mappings for partial and full budgets |
-| `configs/` | Configurations for new experiments |
-| `historical_configs/`, `experiments.json` | Sanitized historical metadata; result files are not included |
-| `queues/` | Historical queue scripts for reference; require local configuration |
-| `audit/` | Source-snapshot records and release validation |
+The datasets are directly available under `data/`:
 
-## Environment and external assets
+| Directory | Items | SID mapping |
+| --- | ---: | --- |
+| `data/Instruments_cl_ori/` | 53,509 | Original PESO mapping |
+| `data/Movies_and_TV_cl_ori/` | 46,074 | Unique four-token SIDs |
+| `data/Books_cl_ori/` | 45,904 | Unique four-token SIDs |
 
-Training targets Linux with Python 3.10 or later, CUDA, DeepSpeed, and two
-compatible NVIDIA GPUs. The pipeline checks for more than 24 GiB free in
-`/dev/shm` and approximately 22 GiB free persistent storage. These checks and
-the original model/tokenizer/data compatibility checks are retained.
+Each dataset contains interaction splits `block_0` through `block_4`, the SID
+index, and item metadata as `.item.part001.json`, `.item.part002.json`, etc.
+These are ordinary JSON dictionaries; the data loader combines their records
+automatically. Interaction splits and SID indices retain the original bytes;
+item fields retain their original JSON values. Instruments retains its original
+SID collisions. Movies and Books each use one distinct SID per item.
 
-Install a CUDA-compatible PyTorch build, then the packages in
-`requirements.txt`. Install FlashAttention separately for the selected
-PyTorch/CUDA environment, for example `pip install flash-attn --no-build-isolation`.
-The source pins Transformers 4.52.4; a full original environment lock was not
-provided, so other package versions require validation in the target environment.
+No model weights, Block-0 checkpoints, tokenizer files, or embedding arrays are
+included. The dataset `block_0.json` files are included.
 
-Provide the Books_cl_ori data files, the Llama-3.2-1B base model, and the shared
-Block-0 checkpoint separately. They are not included in this code release.
-`readable_source/block0_provenance.json` retains asset checksums needed by the
-preflight; substitute assets require an appropriate provenance review.
+## Run
 
-Copy `resources.example.json` to `resources.local.json`, then set `data`,
-`block0`, `base_model`, and `environment` to your absolute local paths. The
-`environment` value is the virtual-environment directory containing `bin/python`.
-The local configuration is ignored by Git. Default `/opt/idarec/` paths are
-examples and do not refer to the original development machine.
+Training targets Linux, Python 3.10+, CUDA, DeepSpeed, and two NVIDIA GPUs. Install
+a CUDA-compatible PyTorch build and the packages in `requirements.txt`.
+FlashAttention must be installed for the selected CUDA/PyTorch environment.
+The supplied source uses Transformers 4.52.4; the original complete environment
+lock was not included.
 
-## Prepare and launch
-
-Run from this repository directory. Keep the output on the same filesystem
-as the repository because the launcher uses hard links. Each output must be new.
+Copy `resources.example.json` to `resources.local.json` and set the base-model,
+Block-0 checkpoint, and Python environment paths. The default data resource
+already points to `data/Books_cl_ori`. The local configuration is ignored by Git.
 
 ```bash
 cp resources.example.json resources.local.json
-# Edit resources.local.json before launching.
 mkdir -p runs
 python run.py --config configs/budget20_lr1e4.json --output runs/books_budget20
 ```
 
-The command above only prepares files and links. To prepare a new run and
-start training followed by evaluation explicitly:
+The command above prepares a run. To prepare a new run and launch training
+followed by recommendation evaluation:
 
 ```bash
 python run.py --config configs/budget20_lr1e4.json --output runs/books_budget20_training --launch
 ```
 
-The readable source mirrors the grouped profile. The launcher loads code from
-`objects/`, so editing only `readable_source/` does not change launched jobs.
-Do not modify object files in place or edit prepared hard-linked code.
+Use a new output directory on the same filesystem as the repository because
+prepared code uses hard links. Model checkpoints and training outputs are local
+run artifacts.
 
-## Validation and sanitization
+## Upstream
 
-See `SANITIZATION.md` and `audit/release_validation.json`. Source paths,
-internal network addresses, and personal filesystem identifiers were removed
-from both readable files and immutable objects. Object hashes and profile
-references were regenerated. No model weights, datasets, credentials, or live
-run logs are included. Checks cover syntax, JSON, object integrity, and launcher
-preparation/configuration; this release has not rerun GPU training or evaluation.
-
-## Upstream reference
-
-This snapshot includes code derived from [PESO](https://github.com/hsyoo32/peso)
-at commit `edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e`.
-Upstream file provenance is preserved under `readable_source/official_baseline/`.
-No new redistribution license is assigned by this packaging step.
+This implementation includes code and the original Instruments data from
+[PESO](https://github.com/hsyoo32/peso), revision
+`edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e`. Movies and Books use the
+author-constructed temporal datasets and unique SID mappings. Upstream code is
+retained in `readable_source/official_baseline/`. No new redistribution license
+is assigned by this packaging step.
