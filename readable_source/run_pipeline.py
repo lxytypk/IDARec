@@ -51,9 +51,6 @@ def make_eval_layout():
             values={k:f.get_tensor(k) for k in f.keys() if '.modules_to_save.default.' in k}
             assert len(values)==2
             save_file(values,str(dest/'modules_to_save.safetensors'))
-        write(dest/'subset_manifest.json',dict(source=str(ROOT/'ckpt'/f'block_{b}'/'model.safetensors'),
-              source_sha256=read(ROOT/'ckpt'/f'block_{b}'/'stage_manifest.json')['files']['model.safetensors'],
-              subset_sha256=digest(dest/'modules_to_save.safetensors')))
 
 def persistent_stage(b):
     parent=ROOT/'persistent_stages'
@@ -70,14 +67,12 @@ def persist_stage(b):
     partial=destination.with_name(destination.name+'_partial_'+stamp())
     assert not destination.exists() and not partial.exists()
     shutil.copytree(source,partial,symlinks=False)
-    copied=[]
     for original in source.rglob('*'):
         if original.is_file():
             relative=original.relative_to(source)
             saved=partial/relative
             assert saved.is_file() and not saved.is_symlink()
             h=digest(original);assert digest(saved)==h,str(relative)
-            copied.append(dict(file=str(relative),sha256=h,bytes=saved.stat().st_size))
     partial.rename(destination)
     temporary_link=stage.with_name(stage.name+'_persistent_link')
     assert stage.is_symlink() and not temporary_link.exists()
@@ -89,7 +84,7 @@ def persist_stage(b):
 
 def main():
     global SELECTED_UUIDS
-    (ROOT/'logs').mkdir(exist_ok=True);(ROOT/'audit').mkdir(exist_ok=True)
+    (ROOT/'logs').mkdir(exist_ok=True)
     lock=(ROOT/'pipeline.lock').open('w');fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     gpu_locks=[]
     for index in [0,1]:
@@ -154,13 +149,10 @@ def main():
                 selection['family_unused_P']={k:selection['family_budget_P'][k]-selection['family_used_P'][k] for k in selection['family_budget_P']}
         seal_stage(b)
         persist_stage(b)
-    write(ROOT/'audit/storage_plan.json',dict(final_system_blocks=[],final_data_blocks=[1,2,3,4],temporary='/dev/shm/books_delta_budget40_lr1e4_20261020_26412_temporary',all_final_stages_persistent=True))
     make_eval_layout()
     result=ROOT/'Books_delta_budget40_lr1e4_beam_search.json'
     if result.exists():result=result.with_name(result.stem+'_'+stamp()+'.json')
     assert not result.exists()
-    write(ROOT/'audit/evaluation_target.json',dict(result=str(result),generation_mode='beam-search',
-          evaluated_blocks=[1,2,3,4],skipped_blocks=[0],stage_restoration='historical_stage_state'))
     cmd=[PYTHON,'-m','torch.distributed.run','--nproc_per_node=2',f'--master_port={port+10}',str(ROOT/'eval_code/continual_test.py'),
          '--ckpt_path',str(ROOT/'evaluation_checkpoints'),'--base_model',str(ROOT/'inputs/base_model'),
          '--seed','42','--dataset','Books_cl_ori','--data_path',str(ROOT/'datasets'),'--results_file',str(result),
@@ -171,12 +163,9 @@ def main():
     phase('evaluation_beam_search',cmd,ROOT/'eval_code',env)
     data=read(result)
     assert data['completed_blocks']==[1,2,3,4] and data['stage_restoration']=='historical_stage_state'
-    removed=[]
     for b in range(1,4):
         path=ROOT/'evaluation_checkpoints'/f'block_{b}'/'modules_to_save.safetensors'
-        removed.append(dict(path=str(path),sha256=digest(path),bytes=path.stat().st_size,full_stage_weights_preserved=True))
         path.unlink()
-    write(ROOT/'audit/duplicate_eval_subsets_removed.json',dict(removed=removed,regenerate='run_pipeline.make_eval_layout(); full stage checkpoints retained'))
     (ROOT/'completed').write_text(stamp())
     write(ROOT/'status.json',dict(status='completed',result=str(result),updated=stamp()))
 if __name__=='__main__':

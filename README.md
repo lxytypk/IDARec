@@ -8,11 +8,19 @@ The internal score-mode identifier is `lora_delta_taylor`.
 
 ## Code
 
-`readable_source/train_code/` contains training and selection code;
-`readable_source/eval_code/` contains recommendation evaluation with historical
-stage restoration. `run.py` prepares experiments from immutable backend files
-in `objects/` and the mappings in `profiles/`. The readable source mirrors the
-grouped backend. Editing only the readable copy does not change launched runs.
+| Directory | Purpose |
+| --- | --- |
+| `configs/` | Configurations for the supported LoRA parameter budgets |
+| `data/` | Instruments, Movies, and Books interaction data, item metadata, and SID mappings |
+| `objects/` | Executable backend files loaded by the experiment launcher |
+| `profiles/` | Backend mappings for partial-budget and full-budget experiments |
+| `readable_source/` | Readable training, selection, evaluation, and launch code |
+
+Within `readable_source/`, `train_code/` implements training and matrix selection,
+and `eval_code/` computes recommendation metrics using historical stage state.
+`run_pipeline.py` runs the stages; `train_entry.py` starts distributed training.
+The readable source mirrors the grouped backend. Editing only the readable
+copy does not change launched runs because `run.py` loads files from `objects/`.
 
 `configs/` includes 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, and 100% LoRA A/B
 budget configurations, seed 42, an actual initial learning rate of 1e-4, and two
@@ -68,11 +76,8 @@ Use a new output directory on the same filesystem as the repository because
 prepared code uses hard links. Model checkpoints and training outputs are local
 run artifacts.
 
-## Upstream
+## Acknowledgements
 
-This implementation includes code and the original Instruments data from
-[PESO](https://github.com/hsyoo32/peso), revision
-`edbec5f68ddc83e39f22a041f1f2eaf1c4ad172e`. Movies and Books use the
-author-constructed temporal datasets and unique SID mappings. Upstream code is
-retained in `readable_source/official_baseline/`. No new redistribution license
-is assigned by this packaging step.
+IDARec builds on [PESO](https://github.com/hsyoo32/peso) and uses its original
+Instruments dataset. Movies and Books use the author-constructed temporal
+datasets and unique SID mappings.

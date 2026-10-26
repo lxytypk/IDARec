@@ -96,7 +96,6 @@ def load_continual_model(args, tokenizer, device_map, local_rank, block_ckpt_pat
 
     state_dict = load_file(model_ckpt, device="cpu")
     missing_full, unexpected_full = model.load_state_dict(state_dict, strict=False)
-    model._load_audit = dict(final_missing=missing_full, final_unexpected_before_history_reconstruction=unexpected_full)
     reconstruct_saved_parameter_lists(model, state_dict, local_rank)
 
     if args.use_final_model and test_block < args.num_blocks - 1:
@@ -106,7 +105,6 @@ def load_continual_model(args, tokenizer, device_map, local_rank, block_ckpt_pat
 
         subset_state = load_file(subset_file, device="cpu")
         missing, unexpected = model.load_state_dict(subset_state, strict=False)
-        model._load_audit.update(subset_source=subset_file, subset_missing=missing, subset_unexpected=unexpected)
         if local_rank == 0:
             print(f"Loaded per-block modules_to_save from: {subset_file}")
             if missing:

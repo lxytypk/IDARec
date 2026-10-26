@@ -19,6 +19,7 @@ from continual_lora import apply_continual_lora
 from evaluate import get_metrics_results, get_topk_results
 from safetensors.torch import load_file
 from utils import *
+from evaluate import ExactSampler, pin_generation, coverage_metadata, gather_complete, save_progress, GENERATION, METRICS
 
 
 def reconstruct_saved_parameter_lists(model, state_dict, local_rank):
@@ -94,7 +95,7 @@ def load_continual_model(args, tokenizer, device_map, local_rank, block_ckpt_pat
         raise RuntimeError(f"Checkpoint for block {test_block} not found at {model_ckpt}!")
 
     state_dict = load_file(model_ckpt, device="cpu")
-    model.load_state_dict(state_dict, strict=False)
+    missing_full, unexpected_full = model.load_state_dict(state_dict, strict=False)
     reconstruct_saved_parameter_lists(model, state_dict, local_rank)
 
     if args.use_final_model and test_block < args.num_blocks - 1:
@@ -116,6 +117,7 @@ def load_continual_model(args, tokenizer, device_map, local_rank, block_ckpt_pat
     model.generation_config.pad_token_id = tokenizer.pad_token_id
     model.generation_config.eos_token_id = tokenizer.eos_token_id
 
+    pin_generation(model, args, test_block)
     return model
 
 
@@ -124,6 +126,7 @@ def continual_test_ddp(args):
     set_seed(args.seed)
 
     world_size = int(os.environ.get("WORLD_SIZE", 1))
+    assert world_size == 2, world_size
     local_rank = int(os.environ.get("LOCAL_RANK") or 0)
     torch.cuda.set_device(local_rank)
     if local_rank == 0:
@@ -148,16 +151,12 @@ def continual_test_ddp(args):
 
     prompt_ids = [0]
 
-    test_blocks = range(args.num_blocks) if args.test_all_blocks else [args.test_block]
+    assert args.test_all_blocks and args.use_final_model and args.skip_block0
+    test_blocks = [1, 2, 3, 4]
     all_block_results = {}
+    if local_rank == 0: save_progress(args, all_block_results)
 
     for test_block in test_blocks:
-        if test_block == 0 and args.skip_block0:
-            all_block_results[f"block_{test_block}"] = {
-                "all_prompt_results": [{m: 0 for m in args.metrics.split(",")} for _ in prompt_ids]
-            }
-            continue
-
         if local_rank == 0:
             print(f"\n{'=' * 50}")
             print(f"Testing on Block {test_block}")
@@ -181,7 +180,7 @@ def continual_test_ddp(args):
         model = load_continual_model(args, tokenizer, device_map, local_rank, block_ckpt_path, test_block)
         args.use_final_model = original_use_final_model
         model = model.to(device)
-        model = DistributedDataParallel(model, device_ids=[local_rank])
+        model = DistributedDataParallel(model, device_ids=[local_rank], broadcast_buffers=False)
 
         for _, module in model.module.named_modules():
             if hasattr(module, "set_saved_matrices"):
@@ -197,7 +196,8 @@ def continual_test_ddp(args):
         if local_rank == 0:
             print(f"Test data size for block {test_block}: {len(test_data)}")
 
-        ddp_sampler = DistributedSampler(test_data, num_replicas=world_size, rank=local_rank, drop_last=True)
+        coverage_info = coverage_metadata(test_data, args, test_block, tokenizer)
+        ddp_sampler = ExactSampler(test_data, num_replicas=world_size, rank=local_rank)
         collator = TestCollator(args, tokenizer)
         all_items = test_data.get_all_items()
         prefix_allowed_tokens = test_data.get_prefix_allowed_tokens_fn(tokenizer)
@@ -223,33 +223,25 @@ def continual_test_ddp(args):
                 test_loader.dataset.set_prompt(prompt_id)
                 metrics_results = {}
                 total = 0
+                seen_indices = []
+                shard_indices = list(iter(ddp_sampler))
 
                 for step, batch in enumerate(tqdm(test_loader)):
                     inputs = batch[0].to(device)
                     targets = batch[1]
                     bs = len(targets)
+                    seen_indices.extend(shard_indices[len(seen_indices):len(seen_indices)+bs])
                     num_beams = args.num_beams
 
-                    while True:
-                        try:
-                            output = model.module.generate(
-                                input_ids=inputs["input_ids"],
-                                attention_mask=inputs["attention_mask"],
-                                max_new_tokens=10,
-                                prefix_allowed_tokens_fn=prefix_allowed_tokens,
-                                num_beams=num_beams,
-                                num_return_sequences=num_beams,
-                                output_scores=True,
-                                return_dict_in_generate=True,
-                                early_stopping=True,
-                            )
-                            break
-                        except torch.cuda.OutOfMemoryError:
-                            print("Out of memory!")
-                            num_beams = num_beams - 1
-                            print("Beam:", num_beams)
-                        except Exception:
-                            raise RuntimeError
+                    assert not model.module.training
+                    assert model.module.generation_config.get_generation_mode(None) == GenerationMode.BEAM_SEARCH
+                    output = model.module.generate(
+                        input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"],
+                        prefix_allowed_tokens_fn=prefix_allowed_tokens,
+                        do_sample=False, num_beams=10, num_return_sequences=10,
+                        max_new_tokens=10, early_stopping=True, synced_gpus=False,
+                        output_scores=True, return_dict_in_generate=True,
+                    )
 
                     output_ids = output["sequences"]
                     scores = output["sequences_scores"]
@@ -263,36 +255,17 @@ def continual_test_ddp(args):
                         all_items=all_items if args.filter_items else None,
                     )
 
-                    bs_gather_list = [None for _ in range(world_size)]
-                    dist.all_gather_object(obj=bs, object_list=bs_gather_list)
-                    total += sum(bs_gather_list)
+                    total += bs
+                    batch_metrics_res = get_metrics_results(topk_res, metrics)
+                    for metric_name, value in batch_metrics_res.items():
+                        metrics_results[metric_name] = metrics_results.get(metric_name, 0.) + value
+                    if (step + 1) % 100 == 0:
+                        print(f"Block {test_block}, rank {local_rank}, local batches {step+1}/{len(test_loader)}", flush=True)
 
-                    res_gather_list = [None for _ in range(world_size)]
-                    dist.all_gather_object(obj=topk_res, object_list=res_gather_list)
-
-                    if local_rank == 0:
-                        all_device_topk_res = []
-                        for ga_res in res_gather_list:
-                            all_device_topk_res += ga_res
-                        batch_metrics_res = get_metrics_results(all_device_topk_res, metrics)
-                        for metric_name, res in batch_metrics_res.items():
-                            if metric_name not in metrics_results:
-                                metrics_results[metric_name] = res
-                            else:
-                                metrics_results[metric_name] += res
-
-                        if (step + 1) % 50 == 0:
-                            temp = {m: metrics_results[m] / total for m in metrics_results}
-                            print(f"Block {test_block}, Prompt {prompt_id}, Step {step + 1}:", temp)
-
-                    dist.barrier()
-
+                metrics_results, total = gather_complete(metrics_results, total, seen_indices, coverage_info, test_block, world_size)
                 if local_rank == 0:
-                    for metric_name in metrics_results:
-                        metrics_results[metric_name] = metrics_results[metric_name] / total
-
                     all_prompt_results.append(metrics_results)
-                    print(f"Block {test_block}, Prompt {prompt_id} results:", metrics_results)
+                    print(f"Block {test_block}, Prompt {prompt_id} results:", metrics_results, flush=True)
 
                 dist.barrier()
 
@@ -300,21 +273,18 @@ def continual_test_ddp(args):
             print(f"\nBlock {test_block} Final Results:")
             all_block_results[f"block_{test_block}"] = {
                 "all_prompt_results": all_prompt_results,
+                "original_users": coverage_info["original_users"],
+                "eligible_users": coverage_info["eligible_users"],
+                "evaluated_users": total,
+                "unique_users": total,
             }
 
         dist.barrier()
+        if local_rank == 0: save_progress(args, all_block_results)
         del model
         torch.cuda.empty_cache()
 
-    if local_rank == 0:
-        save_data = {
-            "prompt_id": 0,
-            "test_blocks": list(test_blocks),
-            "all_block_results": all_block_results,
-        }
-        with open(args.results_file, "w") as f:
-            json.dump(save_data, f, indent=4)
-        print(f"Results saved to: {args.results_file}")
+    if local_rank == 0: save_progress(args, all_block_results)
 
     dist.destroy_process_group()
 

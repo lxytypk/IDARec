@@ -1,9 +1,0 @@
-{
-  "name": "books_delta_taylor_lr2e4_budget20_a40_m60_s100_26412",
-  "path": "/opt/idarec/runs/books_delta_taylor_lr2e4_budget20_a40_m60_s100_26412",
-  "status": "completed",
-  "budget_ratio": 0.2,
-  "actual_initial_lr": 0.0002,
-  "historical_snapshot_preserved": true,
-  "result": "/opt/idarec/runs/books_delta_taylor_lr2e4_budget20_a40_m60_s100_26412/Books_delta_budget20_lr2e4_beam_search.json"
-}

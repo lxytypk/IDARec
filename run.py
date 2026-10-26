@@ -95,7 +95,7 @@ def transform(name,text,cfg,profile,out):
 def prepare(cfg,output):
     cfg=dict(cfg)
     assert cfg.get('dataset','Books_cl_ori')=='Books_cl_ori'
-    assert cfg.get('seed',42)==42,'This verified profile uses seed42'
+    assert cfg.get('seed',42)==42,'This experiment profile uses seed42'
     budget=float(cfg['budget_ratio']);assert 0<budget<=1
     share=float(cfg.get('attention_share',.4));assert 0<share<1
     assert float(cfg['actual_initial_lr'])>0
@@ -110,13 +110,12 @@ def prepare(cfg,output):
         cfg['attention_share']=float(profile['values']['share_literal'])
         cfg['all_AB_update']=True
     output.mkdir()
-    files={}
     for name,key in profile['files'].items():
         raw=(SHARED/'objects'/key).read_bytes();assert digest(raw)==key
         if name.endswith('.py'):
             text=transform(name,raw.decode(),cfg,profile,output);compile(text,str(output/name),'exec');raw=text.encode()
-        files[name]=materialize_blob(output/name,raw)
-    for name in ['audit','logs','inputs','ckpt','datasets','persistent_stages','wandb']:(output/name).mkdir(exist_ok=True)
+        materialize_blob(output/name,raw)
+    for name in ['logs','inputs','ckpt','datasets','persistent_stages','wandb']:(output/name).mkdir(exist_ok=True)
     resources=load_resources()
     for name,target in [('shared_block0',resources['block0']),('base_model',resources['base_model']),('data',resources['data'])]:
         (output/'inputs'/name).symlink_to(target,target_is_directory=True)
@@ -124,7 +123,6 @@ def prepare(cfg,output):
     (output/'datasets/Books_cl_ori').symlink_to(resources['data'],target_is_directory=True)
     (output/'env').symlink_to(resources['environment'],target_is_directory=True)
     write(output/'requested_config.json',dict(cfg,method='IDARec',score_backend='lora_delta_taylor',generation_mode='beam-search',evaluated_blocks=[1,2,3,4],skipped_blocks=[0],stage_restoration='historical_stage_state',official_commit=resources['official_commit'],shared_code=str(SHARED),backend_profile=profile['kind']))
-    write(output/'shared_code_manifest.json',dict(shared_objects=files,mode='read-only hardlinks; changed entry files receive new immutable objects',original_source=profile['source'],core_scoring_and_training_files_unchanged=True))
     write(output/'status.json',dict(status='prepared_not_started',training_started=False))
     return output
 
@@ -148,7 +146,7 @@ def main():
     p.add_argument('--launch',action='store_true',help='Explicitly run training and evaluation after preparing')
     args=p.parse_args()
     if args.list:
-        print(json.dumps(read(SHARED/'experiments.json'),indent=2));return
+        print(json.dumps([dict(name=path.stem, **read(path)) for path in sorted((SHARED/'configs').glob('*.json'))],indent=2));return
     assert args.config and args.output,'Provide --config and --output'
     output=prepare(read(args.config),args.output)
     if args.launch:execute(output)
