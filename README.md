@@ -67,8 +67,8 @@ python run.py --config configs/budget40_lr1e4.json \
 
 Use a new output directory for each experiment. The launcher copies the current
 `src/` into that directory, so source edits apply to newly prepared runs.
-Training logs are written to `<output>/logs/launcher.log`; the launched pipeline
-runs in the background.
+The launched pipeline runs in the background. For the command above, its log is
+`runs/books_budget40/logs/launcher.log`.
 
 ## Acknowledgements
 
