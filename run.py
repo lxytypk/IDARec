@@ -73,7 +73,9 @@ def execute(output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true", help="List the available budget configurations")
-    parser.add_argument("--config", type=Path)
+    parser.add_argument("--config", type=Path,
+                        default=PROJECT_ROOT / "configs" / "budget40_lr1e4.json",
+                        help="Budget configuration (default: 40% total, 40% attention / 60% MLP)")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--launch", action="store_true", help="Start training and evaluation after preparation")
     args = parser.parse_args()
@@ -82,8 +84,8 @@ def main():
                    for path in sorted((PROJECT_ROOT / "configs").glob("*.json"))]
         print(json.dumps(configs, indent=2))
         return
-    if args.config is None or args.output is None:
-        parser.error("Provide --config and --output")
+    if args.output is None:
+        parser.error("Provide --output")
     output = prepare(read_json(args.config), args.output)
     if args.launch:
         execute(output)

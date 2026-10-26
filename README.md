@@ -53,6 +53,11 @@ included. The dataset `block_0.json` files are included.
 
 ## Run
 
+The default is a 40% total LoRA A/B parameter budget. Of that budget, 40% is
+assigned to Attention and 60% to MLP. `attention_share=0.4` defines the split;
+MLP receives the remaining share. The default configuration is
+`configs/budget40_lr1e4.json`; use `--config` to select another supported budget.
+
 Training targets Linux, Python 3.10+, CUDA, DeepSpeed, and two NVIDIA GPUs. Install
 a CUDA-compatible PyTorch build and the packages in `requirements.txt`.
 FlashAttention must be installed for the selected CUDA/PyTorch environment.
@@ -66,14 +71,14 @@ already points to `data/Books_cl_ori`. The local configuration is ignored by Git
 ```bash
 cp resources.json resources.local.json
 mkdir -p runs
-python run.py --config configs/budget20_lr1e4.json --output runs/books_budget20
+python run.py --config configs/budget40_lr1e4.json --output runs/books_budget40
 ```
 
 The command above prepares a run. To prepare a new run and launch training
 followed by recommendation evaluation:
 
 ```bash
-python run.py --config configs/budget20_lr1e4.json --output runs/books_budget20_training --launch
+python run.py --config configs/budget40_lr1e4.json --output runs/books_budget40_training --launch
 ```
 
 Use a new output directory for each experiment. Source files are copied, so the
