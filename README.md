@@ -59,12 +59,12 @@ FlashAttention must be installed for the selected CUDA/PyTorch environment.
 The supplied source uses Transformers 4.52.4; the original complete environment
 lock was not included.
 
-Copy `resources.example.json` to `resources.local.json` and set the base-model,
+Copy `resources.json` to `resources.local.json` and set the base-model,
 Block-0 checkpoint, and Python environment paths. The default data resource
 already points to `data/Books_cl_ori`. The local configuration is ignored by Git.
 
 ```bash
-cp resources.example.json resources.local.json
+cp resources.json resources.local.json
 mkdir -p runs
 python run.py --config configs/budget20_lr1e4.json --output runs/books_budget20
 ```
