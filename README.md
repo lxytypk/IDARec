@@ -8,24 +8,28 @@ The internal score-mode identifier is `lora_delta_taylor`.
 
 ## Code
 
-| Directory | Purpose |
+| Path | Purpose |
 | --- | --- |
 | `configs/` | Configurations for the supported LoRA parameter budgets |
 | `data/` | Instruments, Movies, and Books interaction data, item metadata, and SID mappings |
-| `objects/` | Executable backend files loaded by the experiment launcher |
-| `profiles/` | Backend mappings for partial-budget and full-budget experiments |
-| `readable_source/` | Readable training, selection, evaluation, and launch code |
+| `src/` | Editable source code used directly by the experiment launcher |
+| `src/train_code/` | Training, importance scoring, and matrix selection |
+| `src/eval_code/` | Recommendation evaluation with historical stage restoration |
 
-Within `readable_source/`, `train_code/` implements training and matrix selection,
-and `eval_code/` computes recommendation metrics using historical stage state.
-`run_pipeline.py` runs the stages; `train_entry.py` starts distributed training.
-The readable source mirrors the grouped backend. Editing only the readable
-copy does not change launched runs because `run.py` loads files from `objects/`.
+`run.py` loads the chosen configuration and copies the current `src/` files into
+an independent run directory. Edit the files in `src/` to change future runs;
+existing run directories keep their own source copies. `src/run_config.py`
+constructs the training and evaluation commands from configuration values.
+`src/run_pipeline.py` runs the continual stages, and `src/train_entry.py`
+starts distributed training.
 
 `configs/` includes 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, and 100% LoRA A/B
 budget configurations, seed 42, an actual initial learning rate of 1e-4, and two
-GPUs. Partial budgets use a 40%/60% attention/MLP split. The 100% profile updates
-all A/B matrices. The shared launcher is configured for Books/Llama-3.2-1B.
+GPUs. Partial budgets use the configured attention/MLP share (40%/60% by default).
+The 100% budget enables all A/B matrices and assigns the complete attention and
+MLP parameter totals: 1,703,936 and 3,932,160, respectively. Learning rate,
+reselection interval, GPU indices, and communication port are taken from the
+chosen JSON configuration. The launcher targets Books/Llama-3.2-1B.
 
 ## Data
 
@@ -72,9 +76,9 @@ followed by recommendation evaluation:
 python run.py --config configs/budget20_lr1e4.json --output runs/books_budget20_training --launch
 ```
 
-Use a new output directory on the same filesystem as the repository because
-prepared code uses hard links. Model checkpoints and training outputs are local
-run artifacts.
+Use a new output directory for each experiment. Source files are copied, so the
+run directory can be on a different filesystem from the repository. Model
+checkpoints and training outputs remain local run artifacts.
 
 ## Acknowledgements
 
