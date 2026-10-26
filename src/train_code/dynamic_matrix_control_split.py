@@ -17,7 +17,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Subset
 from transformers import TrainerCallback
 from continual_train import ContinualLoRATrainer
-import matrix_static_budget50 as base
+import static_training as base
 from split_budget_utils import family_counts, greedy_selection_split, split_budget_limits
 from lora_ab_grad_score import LoRAABGradientAccumulator
 from score_variants import module_score

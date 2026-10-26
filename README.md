@@ -22,6 +22,9 @@ existing run directories keep their own source copies. `src/run_config.py`
 constructs the training and evaluation commands from configuration values.
 `src/run_pipeline.py` runs the continual stages, and `src/train_entry.py`
 starts distributed training.
+The main training module is `src/train_code/dynamic_training.py`; shared static
+selection helpers are in `static_training.py`, and replay support is in `replay.py`.
+The parameter budget is controlled by the selected configuration.
 
 `configs/` includes 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, and 100% LoRA A/B
 budget configurations, seed 42, an actual initial learning rate of 1e-4, and two

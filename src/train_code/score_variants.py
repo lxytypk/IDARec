@@ -1,6 +1,6 @@
 """Per-example scoring signals; selection unit, budgets, and optimizer stay unchanged."""
 import torch
-from matrix50_replay import score_contribution
+from replay import score_contribution
 
 MODES = ('grad_weight_abs', 'grad_norm', 'lora_ab_grad_sq',
          'lora_delta_taylor', 'lora_ab_taylor', 'lora_ab_fisher')

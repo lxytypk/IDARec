@@ -1,7 +1,7 @@
 import pathlib, sys
 ROOT = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT/'train_code'))
-import matrix_dynamic50_split as experiment
+import dynamic_training as experiment
 # Synchronize the validation-selected path after rank 0 finishes serialization
 # and checkpoint rotation. Trainer 4.52.4 checks path existence on each rank
 # while only rank 0 creates it, so unsynchronized ranks can retain stale paths.

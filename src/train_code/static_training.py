@@ -1,11 +1,9 @@
-import decimal
 #!/usr/bin/env python3
-"""Dynamic family-budgeted matrix selection for the Block1--Block4 PESO chain.
+"""One-shot static matrix selection for a full Block1--Block4 PESO chain.
 
-The lora_ab_grad_sq mode scores the squared gradient of mean probe loss in
-current A/B coordinates, computed by the chain rule from frozen-base gradients.
-Legacy Taylor and base-W GradNorm modes are retained as explicit alternatives.
-All 112 projection modules remain in the forward pass; only selected pairs update.
+The scoring location is the frozen base projection W.  The selected update unit
+is its current LoRA A/B pair.  This deliberately differs from layer selection:
+all 112 projection modules remain in the model; only the selected pairs update.
 """
 import argparse
 import hashlib
@@ -21,7 +19,6 @@ import torch
 import torch.distributed as dist
 import transformers
 import wandb
-from dynamic_matrix_control_split import DynamicController, DynamicTrainer
 from safetensors.torch import load_file
 from torch.utils.data import DataLoader, Subset
 
@@ -30,11 +27,8 @@ from collator import Collator
 from continual_data_v2 import load_continual_datasets_v2
 from continual_train import ContinualLoRATrainer, apply_lora_for_block, load_backbone_model, reconstruct_saved_parameter_lists
 from utils import parse_dataset_args, parse_global_args, parse_train_args, set_seed
-from matrix50_replay import ReplayDataset, fingerprint, score_contribution
+from replay import ReplayDataset, fingerprint, score_contribution
 from continual_data_v2 import ContinualSeqRecDataset_v2
-from split_budget_utils import family_counts, greedy_selection_split, split_budget_limits
-from lora_ab_grad_score import LoRAABGradientAccumulator
-from score_variants import MODES, formula as score_formula, module_score
 
 
 def rank0():
@@ -101,20 +95,8 @@ def trainable_vocab_count(model):
     )
 
 
-def selection_score(args, raw_score, lora_cost):
-    """Return the ranking score while keeping the LoRA parameter budget exact."""
-    if args.selection_score_mode == "pure_gradient":
-        return raw_score
-    return raw_score / lora_cost
-
-
-def selection_rule(args):
-    metric = "raw_score" if args.selection_score_mode == "pure_gradient" else "raw_score/lora_cost"
-    return "global descending %s; fixed layer/module ties; skip candidates that do not fit; no fallback" % metric
-
-
 def score(args):
-    """No-step scoring on the fixed current-block probe, using the chosen metric."""
+    """Rank-zero, no-step grad*weight scoring on the fixed current-block probe."""
     if not rank0():
         return
     start = time.time()
@@ -142,7 +124,6 @@ def score(args):
         parameter.grad = None
     for row in candidates.values():
         row["module"].orig.weight.requires_grad_(True)
-    ab_accumulator = LoRAABGradientAccumulator(candidates) if args.score_mode == "lora_ab_grad_sq" else None
     values = {key: 0.0 for key in candidates}
     processed = 0
     try:
@@ -152,15 +133,11 @@ def score(args):
             if loss is None or not torch.isfinite(loss):
                 raise RuntimeError("Probe loss is missing or non-finite")
             loss.backward()
-            if ab_accumulator is not None:
-                ab_accumulator.add(candidates)
             for key, row in candidates.items():
                 weight = row["module"].orig.weight
                 if weight.grad is None:
                     raise RuntimeError("No base-weight gradient for %s" % key)
-                if ab_accumulator is not None:
-                    continue
-                value = module_score(row["module"], weight.grad, args.score_mode)
+                value = score_contribution(weight, weight.grad, args.score_mode)
                 if not torch.isfinite(value):
                     raise RuntimeError("Non-finite score for %s" % key)
                 values[key] += float(value.item())
@@ -176,8 +153,6 @@ def score(args):
         np.random.set_state(np_state)
         torch.set_rng_state(cpu_state)
         torch.cuda.set_rng_state_all(cuda_state)
-    if ab_accumulator is not None:
-        values = ab_accumulator.finish(n)
     after = {key: core.tensor_signature(row["module"].orig.weight) for key, row in candidates.items()}
     changed = [key for key in candidates if not core.signature_equal(before[key], after[key])]
     if changed or processed != n or sum(values.values()) <= 0:
@@ -189,16 +164,14 @@ def score(args):
         rows.append({"matrix": key, "model_module": row["name"], "layer": row["layer"],
                      "projection": row["projection"], "base_weight_shape": list(row["module"].orig.weight.shape),
                      "raw_score": values[key], "lora_cost": costs[key],
-                     "score_per_cost": values[key] / costs[key],
-                     "selection_score": selection_score(args, values[key], costs[key])})
-    rows.sort(key=lambda x: (-x["selection_score"], x["layer"], core.MODULE_INDEX[x["projection"]]))
+                     "score_per_cost": values[key] / costs[key]})
+    rows.sort(key=lambda x: (-x["score_per_cost"], x["layer"], core.MODULE_INDEX[x["projection"]]))
     for index, row in enumerate(rows, 1):
         row["rank"] = index
     full = sum(costs.values())
     budget = int(math.floor(args.budget_ratio * full))
     if len(rows) != 112 or full <= 0 or budget <= 0:
         raise RuntimeError("Invalid candidate/budget statistics")
-    family_budgets = split_budget_limits(budget, args.attention_budget_share)
     report = {
         "method": "static_matrix_" + args.score_mode + "_global_budget",
         "adaptation": "Llama continual recommendation; one pre-training selection per block; projection matrices only",
@@ -207,16 +180,11 @@ def score(args):
                   "probe_ratio": args.probe_ratio, "requested_probe_batches": args.probe_batches,
                   "effective_probe_microbatches": n, "probe_batch_size": args.probe_batch_size,
                   "sample_indices": indices, "model_mode": "eval", "loss": "original response prediction loss",
-                  "score": score_formula(args.score_mode),
-                  "gradient_aggregation": "mean_then_squared_norm" if ab_accumulator is not None else "legacy_per_sample_score",
-                  "ab_gradient_implementation": "chain_rule_from_base_gradient_eval_dropout_disabled" if ab_accumulator is not None else None,
-                  "score_mode": args.score_mode, "selection_score_mode": args.selection_score_mode,
-                  "selection_rule": selection_rule(args), "optimizer_steps": 0},
+                  "score": ("sum_over_microbatches(sum(abs(W_m * grad_W_m_b)))" if args.score_mode == "grad_weight_abs"
+                            else "mean_over_microbatches(sqrt(sum(grad_W_m_b ** 2)))"),
+                  "score_mode": args.score_mode, "optimizer_steps": 0},
         "budget": {"budget_ratio": args.budget_ratio, "all_112_lora_AB_parameters": full,
-                   "budget_P": budget, "attention_budget_share": args.attention_budget_share,
-                   "mlp_budget_share": 1.0 - args.attention_budget_share,
-                   "family_budget_P": family_budgets,
-                   "vocabulary_parameters_excluded_from_P": trainable_vocab_count(model)},
+                   "budget_P": budget, "vocabulary_parameters_excluded_from_P": trainable_vocab_count(model)},
         "matrix_candidates": rows,
         "verification": {"candidate_count": len(rows), "base_weight_signatures_unchanged": True,
                          "random_states_restored": True, "load_info": load_info},
@@ -233,33 +201,23 @@ def prepare(args):
         return
     probe = read_json(score_path(args))
     budget = probe["budget"]["budget_P"]
-    selected, family_used, family_budgets = greedy_selection_split(
-        probe["matrix_candidates"], budget, args.attention_budget_share
-    )
-    used = sum(family_used.values())
-    if (used > budget or not selected or
-            any(family_used[name] > family_budgets[name] for name in family_used)):
+    selected, used = core.greedy_selection(probe["matrix_candidates"], budget)
+    if used > budget or not selected:
         raise RuntimeError("Budget selection failed")
-    selected = sorted(selected, key=core.matrix_sort_key)
     selected_set = set(selected)
     directory = stage_dir(args)
     os.makedirs(directory, exist_ok=True)
     matrix_rows = probe["matrix_candidates"]
     metadata = {
         "method": "matrix_static_budget", "score_mode": args.score_mode,
-        "selection_score_mode": args.selection_score_mode,
         "replay_ratio": args.replay_ratio, "block_id": args.block_id,
         "source_checkpoint": probe["source_checkpoint"], "selected_layers": sorted({int(x.split(".")[1]) for x in selected}),
         "structural_layers": list(range(16)), "matrix_selected": selected,
         "matrix_unselected": sorted({row["matrix"] for row in matrix_rows} - selected_set, key=core.matrix_sort_key),
         "matrix_budget_P": budget, "actual_selected_lora_AB_parameters": used,
-        "attention_budget_share": args.attention_budget_share,
-        "mlp_budget_share": 1.0 - args.attention_budget_share,
-        "family_budget_P": family_budgets, "family_used_P": family_used,
-        "family_selected_matrix_count": family_counts(matrix_rows, selected),
         "remaining_lora_budget": budget - used, "budget_ratio": args.budget_ratio,
         "vocabulary_parameters_excluded_from_budget": probe["budget"]["vocabulary_parameters_excluded_from_P"],
-        "selection_rule": selection_rule(args),
+        "selection_rule": "global descending raw_score/lora_cost; fixed layer/module ties; skip candidates that do not fit; no fallback",
         "score_file": os.path.realpath(score_path(args)),
     }
     write_json(os.path.join(directory, "selected_layers.json"), metadata)
@@ -410,16 +368,15 @@ def train(args):
     model, candidates, load_info = build_model(args, tokenizer, local_rank, selected)
     before = core.selected_reference(model, candidates)
     if rank0():
-        wandb.init(project="matrix_dynamic_full50_s100_v1", name="block%d" % args.block_id, config={**vars(args), "selected_count": len(selected)})
-    learning_rate = float(decimal.Decimal(str(args.learning_rate)) * decimal.Decimal('0.1'))
+        wandb.init(project="matrix_static_full50_v1", name="block%d" % args.block_id, config={**vars(args), "selected_count": len(selected)})
+    learning_rate = args.learning_rate * 0.1
     out = stage_dir(args)
     if rank0():
         # Evaluation must reload the exact semantic-token vocabulary used in
         # training, rather than rebuilding it from whichever data path is live.
         os.makedirs(out, exist_ok=True)
         tokenizer.save_pretrained(out)
-    controller = DynamicController(args, model, candidates, train_data, tokenizer, selected)
-    trainer = DynamicTrainer(dynamic_controller=controller,
+    trainer = ContinualLoRATrainer(
         model=model, train_dataset=train_data, eval_dataset=valid_data,
         args=transformers.TrainingArguments(seed=args.seed, per_device_train_batch_size=args.per_device_batch_size,
             per_device_eval_batch_size=args.per_device_batch_size, gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -440,43 +397,11 @@ def train(args):
         write_json(os.path.join(out, "launch_config.json"), {
             "experiment_args": vars(args), "training_arguments": trainer.args.to_dict(),
             "original_train_length": original_train_length, "actual_train_length": len(train_data),
-            "score_mode": args.score_mode, "selection_score_mode": args.selection_score_mode,
-            "replay_ratio": args.replay_ratio,
+            "score_mode": args.score_mode, "replay_ratio": args.replay_ratio,
             "selected_digest": digest,
         })
-    controller.trainer = trainer
     model.config.use_cache = False
-    from transformers.trainer_utils import get_last_checkpoint
-    resume = get_last_checkpoint(out)
-    trainer.dynamic_resume = resume
-    if args.smoke_steps:
-        trainer.args.max_steps = args.smoke_steps
-        trainer.args.save_strategy = "steps"
-        trainer.args.eval_strategy = "steps"
-        trainer.args.save_steps = args.smoke_steps
-        trainer.args.eval_steps = args.smoke_steps
-        trainer.args.eval_delay = 0
-        trainer.args.load_best_model_at_end = False
-        controller.probe = dict(controller.probe)
-        if os.environ.get('SMOKE_FULL_PROBE') != '1':
-            controller.probe['sample_indices'] = controller.probe['sample_indices'][:4]
-        controller.cfg.reselect_steps = 1
-    trainer.train(resume_from_checkpoint=resume)
-    if args.smoke_steps:
-        controller.audit_interval(trainer.state.global_step)
-        controller.save(out)
-        if rank0():
-            write_json(os.path.join(out, "smoke_passed.json"), dict(steps=trainer.state.global_step,
-                dynamic=controller.state_dict(), two_gpu_zero2=True, no_inactive_updates=True))
-        barrier()
-        dist.destroy_process_group()
-        return
-    controller.save(out)
-    final_selected = set(controller.selected)
-    final_digest = hashlib.sha256(json.dumps(sorted(final_selected)).encode()).hexdigest()
-    dynamic_final = controller.state_dict()
-    selected = controller.union
-    del controller.interval_before
+    trainer.train()
     peak = int(torch.cuda.max_memory_allocated(device))
     peaks = [None] * dist.get_world_size()
     dist.all_gather_object(peaks, peak)
@@ -496,19 +421,14 @@ def train(args):
         write_json(os.path.join(out, "matrix_update_report.json"), updates)
         write_json(os.path.join(out, "training_metadata.json"), {
             "source_checkpoint": os.path.realpath(args.source_checkpoint), "block_id": args.block_id,
-            "selected_digest": final_digest, "selected_count": len(final_selected), "effective_learning_rate": learning_rate,
-            "dynamic_final": dynamic_final, "ever_selected_count_through_best_checkpoint": len(selected),
-            "update_report_scope": "ever selected through the chosen best checkpoint",
+            "selected_digest": digest, "selected_count": len(selected), "effective_learning_rate": learning_rate,
             "added_tokens": added, "training_seconds": time.time() - start,
-            "score_mode": args.score_mode, "selection_score_mode": args.selection_score_mode,
-            "replay_ratio": args.replay_ratio,
+            "score_mode": args.score_mode, "replay_ratio": args.replay_ratio,
             "original_train_length": original_train_length, "actual_train_length": len(train_data),
             "global_steps": trainer.state.global_step, "peak_gpu_memory_bytes_by_rank": peaks,
             "peak_gpu_memory_bytes_rank0": int(torch.cuda.max_memory_allocated(device)), "load_info": load_info,
         })
-        controller.close()
-        del trainer, model, core_model, controller
-        import gc; gc.collect()
+        del trainer, model, core_model
         torch.cuda.empty_cache()
         verify_checkpoint(args, pre_hashes, pre_logits, check_batch, tokenizer, selected, device)
         if wandb.run is not None:
@@ -576,17 +496,10 @@ def parser():
     p.add_argument("--num_blocks", type=int, default=5); p.add_argument("--probe_batches", type=int, default=8)
     p.add_argument("--probe_batch_size", type=int, default=1); p.add_argument("--probe_ratio", type=float, default=0.1)
     p.add_argument("--probe_seed", type=int, default=42); p.add_argument("--budget_ratio", type=float, default=0.75)
-    p.add_argument("--attention_budget_share", type=float, required=True)
-    p.add_argument("--score_mode", choices=MODES, default="grad_weight_abs")
-    p.add_argument("--selection_score_mode", choices=("gradient_per_parameter", "pure_gradient"),
-                   default="gradient_per_parameter")
+    p.add_argument("--score_mode", choices=("grad_weight_abs", "grad_norm"), default="grad_weight_abs")
     p.add_argument("--replay_ratio", type=float, default=0.0)
     p.add_argument("--history_samples", type=int, default=256)
     p.add_argument("--history_seed", type=int, default=42)
-    p.add_argument("--reselect_steps", type=int, default=100)
-    p.add_argument("--smoke_steps", type=int, default=0)
-    p.add_argument("--regularization_mode", choices=("none", "ab_anchor"), default="none")
-    p.add_argument("--regularization_weight", type=float, default=0.0)
     return p
 
 
@@ -594,12 +507,8 @@ def main():
     args = core.normalize_args(parser().parse_args())
     if not 0 < args.budget_ratio <= 1:
         raise ValueError("budget_ratio must be in (0, 1]")
-    if not 0 < args.attention_budget_share < 1:
-        raise ValueError("attention_budget_share must be in (0, 1)")
     if args.probe_batch_size != 1 or not 0 <= args.replay_ratio < 1:
         raise ValueError("This audited experiment requires probe batch 1 and replay ratio in [0,1)")
-    if args.regularization_weight < 0 or (args.regularization_mode == 'none' and args.regularization_weight != 0):
-        raise ValueError('Invalid explicit regularization configuration')
     set_seed(args.seed); os.makedirs(args.root, exist_ok=True)
     if args.command == "score": score(args)
     elif args.command == "prepare": prepare(args)
