@@ -1,10 +1,6 @@
 # IDARec
 
-IDARec implements budget-constrained dynamic LoRA adaptation for continual
-recommendation. It uses per-example Delta-W Taylor importance to select LoRA
-matrices under attention/MLP parameter budgets. Selection is refreshed every
-100 optimizer steps; inactive matrices and their optimizer state are protected.
-The internal score-mode identifier is `lora_delta_taylor`.
+Code for Not All Modules Need Updating: Importance-Guided Dynamic Adaptation for Continual Learning in Generative Recommendation.
 
 ## Code
 
